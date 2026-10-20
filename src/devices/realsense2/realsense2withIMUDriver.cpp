@@ -224,8 +224,22 @@ bool realsense2withIMUDriver::close()
 
 bool realsense2withIMUDriver::motionSensorStartup()
 {
-    auto it = std::find_if(m_sensors.begin(), m_sensors.end(), [](const rs2::sensor& s) { return s.is<rs2::motion_sensor>(); });
-    if (it == m_sensors.end())
+    // Take the sensor from the device the pipeline is running on: m_sensors may belong to a device
+    // instance replaced by a pipeline restart, whose idle depth sensor gets powered up by every
+    // global time sync request (leaking a USB handle each time with the RSUSB backend).
+    std::vector<rs2::sensor> sensors;
+    try
+    {
+        sensors = m_pipeline.get_active_profile().get_device().query_sensors();
+    }
+    catch (const rs2::error& e)
+    {
+        yCError(REALSENSE2WITHIMU) << "Failed to query the device sensors:" << "(" << e.what() << ")";
+        m_lastError = e.what();
+        return false;
+    }
+    auto it = std::find_if(sensors.begin(), sensors.end(), [](const rs2::sensor& s) { return s.is<rs2::motion_sensor>(); });
+    if (it == sensors.end())
     {
         yCError(REALSENSE2WITHIMU) << "The camera has no IMU, use the realsense2 device instead";
         return false;
