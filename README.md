@@ -200,9 +200,41 @@ alignmentFrame  None      # <-- alignment set to None
 clipPlanes (0.01 10.0)    # <-- lower bound for clipping planes set to 0.01 meters
 ```
 
-### How to use a RealSense D435i
+### How to use a RealSense camera with IMU (D435i, D455)
 
-:construction: UNDER CONSTRUCTION :construction:
+Use the `realsense2withIMU` device. It accepts all the parameters of `realsense2` and also exposes the
+`IThreeAxisGyroscopes`, `IThreeAxisLinearAccelerometers` and `IOrientationSensors` interfaces.
+The IMU is acquired independently from the RGBD pipeline (librealsense motion sensor callback), at the
+IMU native rate, so attach the same device to both an `RGBDSensor_nws_yarp` and a `multipleanalogsensorsserver`:
+
+```xml
+<device name="realsense2dev" type="realsense2withIMU">
+    <!-- SETTINGS / HW_DESCRIPTION groups as for realsense2 -->
+    <param name="gyroFps">  0 </param>
+    <param name="accelFps"> 0 </param>
+</device>
+<device name="IMUWrapper" type="multipleanalogsensorsserver">
+    <param name="period"> 2 </param>
+    <param name="name">   /camera/imu </param>
+    <action phase="startup" level="5" type="attach">
+        <paramlist name="networks"> <elem name="subdeviceimu"> realsense2dev </elem> </paramlist>
+    </action>
+    <action phase="shutdown" level="5" type="detach" />
+</device>
+```
+
+| Parameter       | Type   | Default               | Description |
+|:---------------:|:------:|:---------------------:|:------------|
+| `gyroFps`       | int    | 0                     | Gyroscope rate in Hz, 0 = highest available |
+| `accelFps`      | int    | 0                     | Accelerometer rate in Hz, 0 = highest available |
+| `imuNamePrefix` | string | `realsense`           | Prefix of the sensor names (`<prefix>/gyro_sensor`, ...) |
+| `imuFrameName`  | string | `realsense_imu_frame` | Frame name of the gyroscope, accelerometer and orientation sensors |
+
+:bulb: **NOTE:** the `multipleanalogsensorsserver` publishes only the latest sample, so its `period` (ms) should be shorter than the IMU sample period.
+
+:warning: The orientation is a complementary filter: roll and pitch are corrected by the accelerometer, yaw is pure gyro integration and drifts.
+
+:warning: The IMU must be visible to librealsense (`rs-enumerate-devices` must list a `Motion Module`). On kernels without the `hid-sensor` modules (e.g. NVIDIA Jetson), build librealsense with `-DFORCE_RSUSB_BACKEND=ON`.
 
 ### How to use a RealSense T265
 
