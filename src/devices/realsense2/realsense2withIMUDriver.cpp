@@ -254,7 +254,9 @@ bool realsense2withIMUDriver::motionSensorStartup()
         return false;
     }
 
-    m_rotation_estimator = std::make_unique<rotation_estimator>();
+    if (!m_rotation_estimator) {
+        m_rotation_estimator = std::make_unique<rotation_estimator>();
+    }
     try
     {
         m_motion_sensor.open({gyro_profile, accel_profile});
@@ -269,6 +271,17 @@ bool realsense2withIMUDriver::motionSensorStartup()
     m_motion_started = true;
     yCInfo(REALSENSE2WITHIMU) << "IMU started: gyro" << gyro_profile.fps() << "Hz, accel" << accel_profile.fps() << "Hz";
     return true;
+}
+
+// A pipeline restart may replace the device instance: reopen the motion sensor on the new one,
+// otherwise the stale instance keeps leaking USB handles (see motionSensorStartup)
+bool realsense2withIMUDriver::onPipelineRestarted()
+{
+    if (!m_motion_started) {
+        return true;
+    }
+    motionSensorShutdown();
+    return motionSensorStartup();
 }
 
 void realsense2withIMUDriver::motionSensorShutdown()

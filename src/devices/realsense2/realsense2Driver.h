@@ -115,6 +115,8 @@ protected:
     bool        pipelineStartup();
     bool        pipelineShutdown();
     bool        pipelineRestart();
+    // Called after a successful pipelineRestart(), which may replace the device instance
+    virtual bool onPipelineRestarted() { return true; }
     bool        setFramerate(const int _fps);
     void        fallback();
 

@@ -482,12 +482,15 @@ bool realsense2Driver::pipelineShutdown()
 
 bool realsense2Driver::pipelineRestart()
 {
-    std::lock_guard<std::mutex> guard(m_mutex);
-    if (!pipelineShutdown())
-        return false;
+    {
+        std::lock_guard<std::mutex> guard(m_mutex);
+        if (!pipelineShutdown())
+            return false;
 
-    return pipelineStartup();
-
+        if (!pipelineStartup())
+            return false;
+    }
+    return onPipelineRestarted();
 }
 
 bool realsense2Driver::setFramerate(const int _fps)

@@ -48,6 +48,7 @@ public:
     bool close() override;
 
 private:
+    bool onPipelineRestarted() override;
     bool motionSensorStartup();
     void motionSensorShutdown();
     void onMotionFrame(const rs2::frame& frame);
