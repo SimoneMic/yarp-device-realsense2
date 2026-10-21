@@ -232,7 +232,9 @@ IMU native rate, so attach the same device to both an `RGBDSensor_nws_yarp` and 
 
 :bulb: **NOTE:** the `multipleanalogsensorsserver` publishes only the latest sample, so its `period` (ms) should be shorter than the IMU sample period.
 
-:warning: The orientation is a complementary filter: roll and pitch are corrected by the accelerometer, yaw is pure gyro integration and drifts.
+:bulb: **NOTE:** all IMU data is expressed in the frame used by librealsense for the motion streams, aligned with the camera optical frame: x right, y down, z forward (looking out of the camera). `rotateImage180` rotates only the images, not the IMU data. Gyroscope in deg/s, accelerometer in m/s^2 (at rest it measures +9.81 along the up direction).
+
+:warning: The orientation is a complementary filter. It is the orientation of the IMU frame with respect to a world frame with z up, as roll, pitch, yaw (deg) with R = Rz(yaw) * Ry(pitch) * Rx(roll): a level camera looking forward reads about (-90, 0, -90). Roll and pitch are corrected by the accelerometer; yaw is pure gyro integration, it starts with the camera forward axis along the world x axis and drifts.
 
 :warning: The IMU must be visible to librealsense (`rs-enumerate-devices` must list a `Motion Module`). On kernels without the `hid-sensor` modules (e.g. NVIDIA Jetson), build librealsense with `-DFORCE_RSUSB_BACKEND=ON`.
 

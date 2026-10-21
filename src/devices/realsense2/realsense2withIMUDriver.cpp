@@ -41,113 +41,162 @@ YARP_LOG_COMPONENT(REALSENSE2WITHIMU, "yarp.device.realsense2withIMU")
 }
 
 
-struct float3 {
-    float x;
-    float y;
-    float z;
-
-    float3 operator*(float t)
-    {
-        return { x * t, y * t, z * t };
-    }
-
-    float3 operator-(float t)
-    {
-        return { x - t, y - t, z - t };
-    }
-
-    void operator*=(float t)
-    {
-        x = x * t;
-        y = y * t;
-        z = z * t;
-    }
-
-    void add(float t1, float t2, float t3)
-    {
-        x += t1;
-        y += t2;
-        z += t3;
-    }
+namespace {
+struct vec3 {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
 };
 
+double dot(const vec3& a, const vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+vec3 cross(const vec3& a, const vec3& b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
+double norm(const vec3& a) { return std::sqrt(dot(a, a)); }
+
+// Unit quaternion, w + xi + yj + zk
+struct quat {
+    double w{1.0};
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+};
+
+quat operator*(const quat& a, const quat& b)
+{
+    return { a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+             a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+             a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+             a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w };
+}
+
+quat normalized(const quat& q)
+{
+    double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    return { q.w / n, q.x / n, q.y / n, q.z / n };
+}
+
+// Rotation of angle |v| (rad) around v
+quat fromRotationVector(const vec3& v)
+{
+    double angle = norm(v);
+    if (angle < 1e-12) {
+        return normalized({ 1.0, v.x / 2, v.y / 2, v.z / 2 });
+    }
+    double s = std::sin(angle / 2) / angle;
+    return { std::cos(angle / 2), v.x * s, v.y * s, v.z * s };
+}
+
+vec3 rotate(const quat& q, const vec3& v)
+{
+    quat r = q * quat{ 0.0, v.x, v.y, v.z } * quat{ q.w, -q.x, -q.y, -q.z };
+    return { r.x, r.y, r.z };
+}
+} // namespace
+
+/* Complementary filter estimating the orientation of the IMU frame (the camera optical frame as reported by
+   librealsense: x right, y down, z forward) with respect to a world frame with z up (opposite to gravity).
+   The gyroscope is integrated at every sample; every accelerometer sample rotates the estimate by a fraction
+   (1 - alpha) of the tilt error, around a horizontal axis, so it corrects roll and pitch but never yaw.
+   Yaw is pure gyro integration: it starts at 0 with the camera forward axis (z) along the world x axis and drifts. */
 class rotation_estimator
 {
-    // theta is the angle of camera rotation in x, y and z components
-    float3 theta;
-    std::mutex theta_mtx;
-    /* alpha indicates the part that gyro and accelerometer take in computation of theta; higher alpha gives more weight to gyro, but too high
-    values cause drift; lower alpha gives more weight to accelerometer, which is more sensitive to disturbances */
-    float alpha = 0.98;
-    bool first = true;
-    // Keeps the arrival time of previous gyro frame
-    double last_ts_gyro = 0;
+    // Orientation of the IMU frame in the world frame
+    quat q;
+    std::mutex q_mtx;
+    // Higher alpha gives more weight to the gyro (smoother, more drift); lower alpha to the accelerometer (noisier)
+    double alpha = 0.98;
+    // Accelerometer samples whose norm differs from gravity by more than this fraction are not used (camera accelerating)
+    double accel_norm_tolerance = 0.15;
+    double gravity = 9.81;
+    bool initialized = false;
+    // Previous gyro timestamp (ms), < 0 if none
+    double last_ts_gyro = -1.0;
 public:
-    // Function to calculate the change in angle of motion based on data from gyro
+    // gyro_data in rad/s, ts in ms
     void process_gyro(rs2_vector gyro_data, double ts)
     {
-        if (first) // On the first iteration, use only data from accelerometer to set the camera's initial position
-        {
-            last_ts_gyro = ts;
+        std::lock_guard<std::mutex> lock(q_mtx);
+        double dt = (ts - last_ts_gyro) / 1000.0;
+        bool valid = initialized && last_ts_gyro >= 0.0 && dt > 0.0 && dt < 0.1;
+        last_ts_gyro = ts;
+        if (!valid) {
             return;
         }
-        // Holds the change in angle, as calculated from gyro
-        float3 gyro_angle;
-
-        // Initialize gyro_angle with data from gyro
-        gyro_angle.x = gyro_data.x; // Pitch
-        gyro_angle.y = gyro_data.y; // Yaw
-        gyro_angle.z = gyro_data.z; // Roll
-
-        // Compute the difference between arrival times of previous and current gyro frames
-        double dt_gyro = (ts - last_ts_gyro) / 1000.0;
-        last_ts_gyro = ts;
-
-        // Change in angle equals gyro measures * time passed since last measurement
-        gyro_angle = gyro_angle * dt_gyro;
-
-        // Apply the calculated change of angle to the current angle (theta)
-        std::lock_guard<std::mutex> lock(theta_mtx);
-        theta.add(-gyro_angle.z, -gyro_angle.y, gyro_angle.x);
+        // The angular velocity is expressed in the IMU frame, so the increment is applied on the right
+        q = normalized(q * fromRotationVector({ gyro_data.x * dt, gyro_data.y * dt, gyro_data.z * dt }));
     }
 
+    // accel_data in m/s^2 (specific force: at rest it points up)
     void process_accel(rs2_vector accel_data)
     {
-        // Holds the angle as calculated from accelerometer data
-        float3 accel_angle;
-
-        // Calculate rotation angle from accelerometer data
-        accel_angle.z = atan2(accel_data.y, accel_data.z);
-        accel_angle.x = atan2(accel_data.x, sqrt(accel_data.y * accel_data.y + accel_data.z * accel_data.z));
-        accel_angle.y = 0; //ADDED by randaz81
-
-        // If it is the first iteration, set initial pose of camera according to accelerometer data (note the different handling for Y axis)
-        std::lock_guard<std::mutex> lock(theta_mtx);
-        if (first)
-        {
-            first = false;
-            theta = accel_angle;
-            // Since we can't infer the angle around Y axis using accelerometer data, we'll use PI as a convetion for the initial pose
-            theta.y = M_PI;
+        vec3 a{ accel_data.x, accel_data.y, accel_data.z };
+        double n = norm(a);
+        if (n < 1e-6) {
+            return;
         }
-        else
+        vec3 up_imu{ a.x / n, a.y / n, a.z / n };
+
+        std::lock_guard<std::mutex> lock(q_mtx);
+        if (!initialized)
         {
-            /*
-            Apply Complementary Filter:
-                - high-pass filter = theta * alpha:  allows short-duration signals to pass through while filtering out signals
-                  that are steady over time, is used to cancel out drift.
-                - low-pass filter = accel * (1- alpha): lets through long term changes, filtering out short term fluctuations
-            */
-            theta.x = theta.x * alpha + accel_angle.x * (1 - alpha);
-            theta.z = theta.z * alpha + accel_angle.z * (1 - alpha);
+            // Rows of the rotation matrix (world <- IMU) are the world axes in IMU coordinates:
+            // z up, x the camera forward axis projected on the horizontal plane (the camera x axis if looking up/down)
+            vec3 fwd{ 0.0, 0.0, 1.0 };
+            if (std::abs(dot(fwd, up_imu)) > 0.99) {
+                fwd = { 1.0, 0.0, 0.0 };
+            }
+            double d = dot(fwd, up_imu);
+            vec3 wx{ fwd.x - d * up_imu.x, fwd.y - d * up_imu.y, fwd.z - d * up_imu.z };
+            double nx = norm(wx);
+            wx = { wx.x / nx, wx.y / nx, wx.z / nx };
+            vec3 wy = cross(up_imu, wx);
+            const vec3& wz = up_imu;
+            double r00 = wx.x, r01 = wx.y, r02 = wx.z;
+            double r10 = wy.x, r11 = wy.y, r12 = wy.z;
+            double r20 = wz.x, r21 = wz.y, r22 = wz.z;
+            double tr = r00 + r11 + r22;
+            if (tr > 0) {
+                double s = 2.0 * std::sqrt(tr + 1.0);
+                q = { s / 4, (r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s };
+            } else if (r00 > r11 && r00 > r22) {
+                double s = 2.0 * std::sqrt(1.0 + r00 - r11 - r22);
+                q = { (r21 - r12) / s, s / 4, (r01 + r10) / s, (r02 + r20) / s };
+            } else if (r11 > r22) {
+                double s = 2.0 * std::sqrt(1.0 + r11 - r00 - r22);
+                q = { (r02 - r20) / s, (r01 + r10) / s, s / 4, (r12 + r21) / s };
+            } else {
+                double s = 2.0 * std::sqrt(1.0 + r22 - r00 - r11);
+                q = { (r10 - r01) / s, (r02 + r20) / s, (r12 + r21) / s, s / 4 };
+            }
+            q = normalized(q);
+            initialized = true;
+            return;
         }
+
+        if (std::abs(n - gravity) > accel_norm_tolerance * gravity) {
+            return;
+        }
+        // Measured up direction in the world frame, and the rotation that brings it on the world z axis
+        vec3 up_world = rotate(q, up_imu);
+        vec3 axis = cross(up_world, { 0.0, 0.0, 1.0 });
+        double s = norm(axis);
+        if (s < 1e-9) {
+            return;
+        }
+        double angle = std::atan2(s, up_world.z) * (1.0 - alpha);
+        q = normalized(fromRotationVector({ axis.x / s * angle, axis.y / s * angle, axis.z / s * angle }) * q);
     }
 
-    // Returns the current rotation angle
-    float3 get_theta()
+    // Roll, pitch, yaw (rad) of the IMU frame in the world frame, with R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    bool get_rpy(double& roll, double& pitch, double& yaw)
     {
-        std::lock_guard<std::mutex> lock(theta_mtx);
-        return theta;
+        std::lock_guard<std::mutex> lock(q_mtx);
+        if (!initialized) {
+            return false;
+        }
+        roll  = std::atan2(2.0 * (q.w * q.x + q.y * q.z), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+        pitch = std::asin(std::clamp(2.0 * (q.w * q.y - q.z * q.x), -1.0, 1.0));
+        yaw   = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        return true;
     }
 };
 
@@ -371,10 +420,11 @@ bool realsense2withIMUDriver::getThreeAxisGyroscopeMeasure(size_t sens_index, ya
     if (sens_index != 0) { return false; }
     std::lock_guard<std::mutex> guard(m_imu_mutex);
     if (!m_gyro_received) { return false; }
+    // librealsense gives rad/s, the YARP interface uses deg/s
     out.resize(3);
-    out[0] = m_last_gyro.x;
-    out[1] = m_last_gyro.y;
-    out[2] = m_last_gyro.z;
+    out[0] = m_last_gyro.x * 180.0 / M_PI;
+    out[1] = m_last_gyro.y * 180.0 / M_PI;
+    out[2] = m_last_gyro.z * 180.0 / M_PI;
     timestamp = m_last_gyro_ts;
     return true;
 }
@@ -459,10 +509,15 @@ bool realsense2withIMUDriver::getOrientationSensorMeasureAsRollPitchYaw(size_t s
         if (!m_gyro_received || !m_accel_received) { return false; }
         timestamp = m_last_gyro_ts;
     }
-    float3 theta = m_rotation_estimator->get_theta();
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+    if (!m_rotation_estimator->get_rpy(roll, pitch, yaw)) {
+        return false;
+    }
     rpy.resize(3);
-    rpy[0] = 0 + theta.x * 180.0 / M_PI; //here we can eventually adjust the sign and/or sum an offset
-    rpy[1] = 0 + theta.y * 180.0 / M_PI;
-    rpy[2] = 0 + theta.z * 180.0 / M_PI;
+    rpy[0] = roll * 180.0 / M_PI;
+    rpy[1] = pitch * 180.0 / M_PI;
+    rpy[2] = yaw * 180.0 / M_PI;
     return true;
 }
