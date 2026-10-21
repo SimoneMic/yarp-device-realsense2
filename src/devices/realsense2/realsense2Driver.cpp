@@ -907,8 +907,51 @@ bool realsense2Driver::open(Searchable& config)
     }
 
     // setting Parameters
-    return setParams();
+    if (!setParams())
+    {
+        return false;
+    }
 
+    // Depth exposure (optional): a fixed exposure avoids the auto-exposure hunting
+    // that makes the depth periodically saturate and recover
+    // Use the depth sensor of the device the pipeline is running on: m_depth_sensor may belong to a
+    // device instance replaced by a pipeline restart, which cannot be powered up while streaming (RSUSB)
+    Bottle& settings = config.findGroup("SETTINGS");
+    rs2::sensor activeDepthSensor;
+    if (settings.check("depthAutoExposure") || settings.check("depthExposure"))
+    {
+        try
+        {
+            activeDepthSensor = m_pipeline.get_active_profile().get_device().first<rs2::depth_sensor>();
+        }
+        catch (const rs2::error& e)
+        {
+            yCError(REALSENSE2) << "Failed to get the depth sensor:" << "(" << e.what() << ")";
+            m_lastError = e.what();
+            return false;
+        }
+    }
+    if (settings.check("depthAutoExposure"))
+    {
+        bool autoExposure = settings.find("depthAutoExposure").asBool();
+        if (!setOption(RS2_OPTION_ENABLE_AUTO_EXPOSURE, &activeDepthSensor, autoExposure ? 1.0f : 0.0f))
+        {
+            yCError(REALSENSE2) << "Failed to set depthAutoExposure";
+            return false;
+        }
+        yCInfo(REALSENSE2) << "Depth auto exposure" << (autoExposure ? "enabled" : "disabled");
+    }
+    if (settings.check("depthExposure"))
+    {
+        float exposure = settings.find("depthExposure").asFloat32();
+        if (!setOption(RS2_OPTION_EXPOSURE, &activeDepthSensor, exposure))
+        {
+            yCError(REALSENSE2) << "Failed to set depthExposure";
+            return false;
+        }
+        yCInfo(REALSENSE2) << "Depth exposure set to" << exposure << "us";
+    }
+    return true;
 }
 
 bool realsense2Driver::close()
